@@ -1,79 +1,124 @@
 # --- 1. Variables et Pré-requis ---
-# Définir les variables pour les chemins et les identifiants
-$backupTarget = "D:"  # Dossier de destination pour les sauvegardes (assurez-vous que D: est un disque valide)
-$fileSharePath = "\\AutreServeur\PartageDossier"  # Remplacez par le chemin UNC du partage de fichiers
-$domainAdminUser = "AdministrateurDomaine"  # Utilisateur du domaine avec privilèges d'administrateur
-$domainAdminPassword = ConvertTo-SecureString "votreMotDePasse" -AsPlainText -Force  # Mot de passe en clair
-$domain = "votre-domaine.local"  # Nom de domaine
+# Définir les variables pour les chemins, les identifiants et le nom du serveur
+$fileSharePath = "\\AutreServeur\PartageDossier"  # Chemin UNC du partage de fichiers
+$backupTarget = "S:"  # Dossier de destination pour les sauvegardes
+$domain = "SimoneVeil.LOCAL"  # Nom du domaine
+$adminUser = "Administrateur"  # Nom de l'utilisateur avec les droits d'ajout
+$adminPassword = "hn54weHG"  # Mot de passe de l'utilisateur (à sécuriser)
+$newServerName = "SRV-SAUV01"  # Nouveau nom du serveur
 
-# --- 2. Ajouter le serveur au domaine (si nécessaire) ---
-# Vérifie si le serveur est déjà dans le domaine
-$computerDomain = (Get-WmiObject -Class Win32_ComputerSystem).Domain
-if ($computerDomain -ne $domain) {
-    Write-Host "Le serveur n'est pas dans le domaine. Ajout en cours..."
-    
-    # Ajouter au domaine
-    $domainCredential = New-Object System.Management.Automation.PSCredential($domainAdminUser, $domainAdminPassword)
-    Add-Computer -DomainName $domain -Credential $domainCredential -Restart
-    Write-Host "Le serveur a été ajouté au domaine. Redémarrage en cours..."
-} else {
-    Write-Host "Le serveur est déjà dans le domaine."
+# Vérification de l'existence du disque S:
+if (!(Test-Path $backupTarget)) {
+    Write-Host "Le disque de sauvegarde $backupTarget n'existe pas." -ForegroundColor Red
+    exit
 }
 
-# --- 3. Installation des fonctionnalités nécessaires ---
-# Installer les fonctionnalités Windows Server Backup et Active Directory Domain Services
-Write-Host "Installation des fonctionnalités nécessaires..."
+# --- 2. Renommage du serveur ---
+Write-Host "Vérification du nom actuel du serveur..."
 
-# Installer Windows Server Backup
+$computerName = $env:COMPUTERNAME
+
+# Vérifier si le serveur a déjà le bon nom
+if ($computerName -eq $newServerName) {
+    Write-Host "Le serveur est déjà nommé $newServerName. Passons à l'étape suivante." -ForegroundColor Yellow
+} else {
+    Write-Host "Renommage du serveur en $newServerName..."
+
+    Try {
+        Rename-Computer -NewName $newServerName -Force -Restart
+        Write-Host "Le serveur a été renommé en $newServerName. Redémarrage..." -ForegroundColor Green
+        exit  # Sortir du script après redémarrage pour laisser le temps au redémarrage de se produire
+    } Catch {
+        Write-Host "Échec du renommage du serveur : $_" -ForegroundColor Red
+        exit
+    }
+}
+
+# --- 3. Ajouter le serveur au domaine (après redémarrage) ---
+# Attendre quelques secondes pour permettre au serveur de redémarrer complètement
+Start-Sleep -Seconds 30  # 30 secondes d'attente avant de continuer après redémarrage
+
+$ComputerInfo = Get-WmiObject -Class Win32_ComputerSystem
+if ($ComputerInfo.PartOfDomain) {
+    Write-Host "Cette machine est déjà membre du domaine $($ComputerInfo.Domain)" -ForegroundColor Yellow
+} else {
+    Try {
+        $securePassword = ConvertTo-SecureString $adminPassword -AsPlainText -Force
+        $credential = New-Object System.Management.Automation.PSCredential("$domain\$adminUser", $securePassword)
+        
+        # Ajouter au domaine
+        Add-Computer -DomainName $domain -Credential $credential -Restart -Force
+        Write-Host "Ajout au domaine $domain en cours..." -ForegroundColor Green
+    } Catch {
+        Write-Host "Échec de l'ajout au domaine : $_" -ForegroundColor Red
+        exit
+    }
+}
+
+# --- 4. Installation des fonctionnalités nécessaires ---
+Write-Host "Installation des fonctionnalités nécessaires..."
 Install-WindowsFeature -Name Windows-Server-Backup -IncludeManagementTools
 
-# Installer Active Directory Domain Services (si non installé)
-Install-WindowsFeature -Name AD-Domain-Services
+# --- 5. Vérification et démarrage du service Windows Server Backup ---
+Write-Host "Vérification du service Windows Server Backup (wbengine)..."
 
-# --- 4. Démarrer le service Windows Server Backup ---
-# Vérifie si le service Windows Server Backup est en cours d'exécution
-$wbengineService = Get-Service -Name "wbengine"
-if ($wbengineService.Status -ne "Running") {
-    Write-Host "Le service Windows Server Backup n'est pas en cours d'exécution. Démarrage..."
-    Start-Service -Name "wbengine"
-} else {
-    Write-Host "Le service Windows Server Backup est déjà en cours d'exécution."
+# Vérifier si la fonctionnalité est bien installée
+$wbFeature = Get-WindowsFeature -Name Windows-Server-Backup
+if (-not $wbFeature.Installed) {
+    Write-Host "La fonctionnalité Windows Server Backup n'est pas installée correctement." -ForegroundColor Red
+    exit
 }
 
-# --- 5. Sauvegarde de l'Active Directory ---
-# Sauvegarde de l'Active Directory et de ses composants critiques (NTDS et SYSVOL)
-Write-Host "Démarrage de la sauvegarde de l'Active Directory..."
-wbadmin start backup -backupTarget:$backupTarget -include:C:\Windows\NTDS, C:\Windows\SYSVOL -allCritical -quiet
-Write-Host "Sauvegarde de l'Active Directory terminée."
+# Vérifier si le service wbengine existe
+$wbengineService = Get-Service -Name "wbengine" -ErrorAction SilentlyContinue
+if ($null -eq $wbengineService) {
+    Write-Host "Le service wbengine n'existe pas sur ce serveur." -ForegroundColor Red
+    exit
+}
 
-# --- 6. Sauvegarde du partage réseau ---
-# Sauvegarde du partage de fichiers situé sur un autre serveur via le réseau
-Write-Host "Démarrage de la sauvegarde du partage de fichiers..."
-wbadmin start backup -backupTarget:$backupTarget -include:$fileSharePath -quiet
-Write-Host "Sauvegarde du partage de fichiers terminée."
+# Démarrer le service si nécessaire
+if ($wbengineService.Status -ne "Running") {
+    Try {
+        Start-Service -Name "wbengine" -ErrorAction Stop
+        Write-Host "Le service wbengine a été démarré avec succès." -ForegroundColor Green
+    } Catch {
+        Write-Host "Échec du démarrage du service wbengine : $_" -ForegroundColor Red
+        exit
+    }
+} else {
+    Write-Host "Le service wbengine est déjà en cours d'exécution." -ForegroundColor Yellow
+}
 
-# --- 7. Création des tâches planifiées ---
-# Créer une tâche planifiée pour la sauvegarde du partage de fichiers
-$backupTriggerFiles = New-ScheduledTaskTrigger -Daily -At "02:00AM"  # Sauvegarde tous les jours à 2h du matin
-$backupActionFiles = New-ScheduledTaskAction -Execute "wbadmin" -Argument "start backup -backupTarget:$backupTarget -include:$fileSharePath -quiet"
-Register-ScheduledTask -Action $backupActionFiles -Trigger $backupTriggerFiles -TaskName "BackupPartageFichier" -User "SYSTEM" -RunLevel Highest
-Write-Host "Tâche planifiée pour la sauvegarde du partage de fichiers créée."
+# --- 6. Sauvegarde des données critiques ---
+Write-Host "Démarrage de la sauvegarde du serveur..."
 
-# Créer une tâche planifiée pour la sauvegarde de l'Active Directory
-$backupTriggerAD = New-ScheduledTaskTrigger -Daily -At "03:00AM"  # Sauvegarde tous les jours à 3h du matin
-$backupActionAD = New-ScheduledTaskAction -Execute "wbadmin" -Argument "start backup -backupTarget:$backupTarget -include:C:\Windows\NTDS, C:\Windows\SYSVOL -allCritical -quiet"
-Register-ScheduledTask -Action $backupActionAD -Trigger $backupTriggerAD -TaskName "BackupAD" -User "SYSTEM" -RunLevel Highest
-Write-Host "Tâche planifiée pour la sauvegarde de l'Active Directory créée."
+# Définition des chemins à sauvegarder (modifiable selon besoin)
+$backupSource = "C:\Data", "C:\ImportantFiles"  # Remplace par les chemins pertinents
+$backupTarget = "S:\Sauvegarde"  # Destination de sauvegarde
 
-# --- 8. Vérification des tâches planifiées ---
-Write-Host "Vérification des tâches planifiées..."
-$taskFiles = Get-ScheduledTask -TaskName "BackupPartageFichier"
-$taskAD = Get-ScheduledTask -TaskName "BackupAD"
+# Vérifier si le dossier de sauvegarde existe
+if (!(Test-Path $backupTarget)) {
+    Write-Host "Le dossier cible $backupTarget n'existe pas. Vérifiez le disque de sauvegarde." -ForegroundColor Red
+    exit
+}
 
-# Afficher l'état des tâches planifiées
-Write-Host "État de la tâche de sauvegarde du partage de fichiers : $($taskFiles.State)"
-Write-Host "État de la tâche de sauvegarde de l'Active Directory : $($taskAD.State)"
+# Lancer la sauvegarde avec Wbadmin
+Try {
+    # Assurez-vous que les chemins de source sont correctement formatés
+    $backupSourceFormatted = $backupSource -join ","
+    wbadmin start backup -backupTarget:$backupTarget -include:$backupSourceFormatted -allCritical -quiet
+    Write-Host "La sauvegarde a été lancée avec succès." -ForegroundColor Green
+} Catch {
+    Write-Host "Échec du lancement de la sauvegarde : $_" -ForegroundColor Red
+    exit
+}
 
-# --- 9. Récapitulatif ---
-Write-Host "Script de sauvegarde exécuté avec succès. Les tâches planifiées ont été créées pour les sauvegardes quotidiennes."
-Write-Host "Sauvegarde du partage de fichiers à 2h du matin et de l'Active Directory à 3h du matin."
+# --- 7. Vérification de la sauvegarde ---
+Start-Sleep -Seconds 10  # Attendre quelques secondes pour éviter une vérification instantanée
+$backupStatus = wbadmin get versions
+
+if ($backupStatus -match "Version identifier") {
+    Write-Host "Sauvegarde terminée avec succès." -ForegroundColor Green
+} else {
+    Write-Host "Échec de la sauvegarde, veuillez vérifier les logs." -ForegroundColor Red
+}
