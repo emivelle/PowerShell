@@ -1,19 +1,12 @@
 # --- 1. Variables et Pré-requis ---
 # Définir les variables pour les chemins, les identifiants et le nom du serveur
-$fileSharePath = "\\AutreServeur\PartageDossier"  # Chemin UNC du partage de fichiers
-$backupTarget = "S:"  # Dossier de destination pour les sauvegardes
 $domain = "SimoneVeil.LOCAL"  # Nom du domaine
 $adminUser = "Administrateur"  # Nom de l'utilisateur avec les droits d'ajout
 $adminPassword = "hn54weHG"  # Mot de passe de l'utilisateur (à sécuriser)
 $newServerName = "SRV-SAUV01"  # Nouveau nom du serveur
+$backupDrive = "S:"  # Disque de destination pour les sauvegardes
 
-# Vérification de l'existence du disque S:
-if (!(Test-Path $backupTarget)) {
-    Write-Host "Le disque de sauvegarde $backupTarget n'existe pas." -ForegroundColor Red
-    exit
-}
-
-# --- 2. Renommage du serveur ---
+# --- 2. Vérification du nom de la machine ---
 Write-Host "Vérification du nom actuel du serveur..."
 
 $computerName = $env:COMPUTERNAME
@@ -34,7 +27,7 @@ if ($computerName -eq $newServerName) {
     }
 }
 
-# --- 3. Ajouter le serveur au domaine (après redémarrage) ---
+# --- 3. Vérification de l'appartenance au domaine ---
 # Attendre quelques secondes pour permettre au serveur de redémarrer complètement
 Start-Sleep -Seconds 30  # 30 secondes d'attente avant de continuer après redémarrage
 
@@ -55,18 +48,39 @@ if ($ComputerInfo.PartOfDomain) {
     }
 }
 
-# --- 4. Installation des fonctionnalités nécessaires ---
-Write-Host "Installation des fonctionnalités nécessaires..."
-Install-WindowsFeature -Name Windows-Server-Backup -IncludeManagementTools
+# --- 4. Vérification du disque de sauvegarde ---
+Write-Host "Vérification de l'existence du disque de sauvegarde..."
 
-# --- 5. Vérification et démarrage du service Windows Server Backup ---
+if (!(Test-Path $backupDrive)) {
+    Write-Host "Le disque de sauvegarde $backupDrive n'existe pas." -ForegroundColor Red
+    exit
+}
+
+# Vérification du format du disque de sauvegarde
+$volume = Get-Volume -DriveLetter $backupDrive.TrimEnd(':')
+if ($volume.FileSystem -ne "NTFS") {
+    Write-Host "Le disque de sauvegarde $backupDrive n'est pas formaté en NTFS." -ForegroundColor Red
+    exit
+}
+
+# Vérification de l'espace disque sur le disque de sauvegarde
+$psDrive = Get-PSDrive -Name $backupDrive.TrimEnd(':')
+$requiredSpaceGB = 50  # Espace requis en Go (modifiable selon besoin)
+$requiredSpaceBytes = $requiredSpaceGB * 1GB
+
+if ($psDrive.Free -lt $requiredSpaceBytes) {
+    Write-Host "Le disque de sauvegarde $backupDrive n'a pas suffisamment d'espace. Espace requis : $requiredSpaceGB Go." -ForegroundColor Red
+    exit
+}
+
+# --- 5. Vérification et installation du service Windows Server Backup ---
 Write-Host "Vérification du service Windows Server Backup (wbengine)..."
 
 # Vérifier si la fonctionnalité est bien installée
 $wbFeature = Get-WindowsFeature -Name Windows-Server-Backup
 if (-not $wbFeature.Installed) {
-    Write-Host "La fonctionnalité Windows Server Backup n'est pas installée correctement." -ForegroundColor Red
-    exit
+    Write-Host "La fonctionnalité Windows-Server-Backup n'est pas installée. Installation en cours..." -ForegroundColor Yellow
+    Install-WindowsFeature -Name Windows-Server-Backup -IncludeManagementTools
 }
 
 # Vérifier si le service wbengine existe
@@ -76,7 +90,7 @@ if ($null -eq $wbengineService) {
     exit
 }
 
-# Démarrer le service si nécessaire
+# Vérifier si le service wbengine est en cours d'exécution
 if ($wbengineService.Status -ne "Running") {
     Try {
         Start-Service -Name "wbengine" -ErrorAction Stop
@@ -93,27 +107,68 @@ if ($wbengineService.Status -ne "Running") {
 Write-Host "Démarrage de la sauvegarde du serveur..."
 
 # Définition des chemins à sauvegarder (modifiable selon besoin)
-$backupSource = "C:\Data", "C:\ImportantFiles"  # Remplace par les chemins pertinents
-$backupTarget = "S:\Sauvegarde"  # Destination de sauvegarde
+$backupSource = "C:\Data"  # Remplace par les chemins pertinents
 
-# Vérifier si le dossier de sauvegarde existe
-if (!(Test-Path $backupTarget)) {
-    Write-Host "Le dossier cible $backupTarget n'existe pas. Vérifiez le disque de sauvegarde." -ForegroundColor Red
-    exit
+# Vérifier si les chemins de source existent
+foreach ($path in $backupSource) {
+    if (!(Test-Path $path)) {
+        Write-Host "Le chemin d'accès $path n'existe pas." -ForegroundColor Red
+        exit
+    }
 }
 
 # Lancer la sauvegarde avec Wbadmin
 Try {
     # Assurez-vous que les chemins de source sont correctement formatés
     $backupSourceFormatted = $backupSource -join ","
-    wbadmin start backup -backupTarget:$backupTarget -include:$backupSourceFormatted -allCritical -quiet
+    wbadmin start backup -backupTarget:$backupDrive -include:$backupSourceFormatted -allCritical -quiet
     Write-Host "La sauvegarde a été lancée avec succès." -ForegroundColor Green
 } Catch {
     Write-Host "Échec du lancement de la sauvegarde : $_" -ForegroundColor Red
     exit
 }
 
-# --- 7. Vérification de la sauvegarde ---
+# --- 7. Sauvegarde de l'Active Directory ---
+Write-Host "Démarrage de la sauvegarde de l'Active Directory..."
+
+# Lancer la sauvegarde de l'Active Directory avec Wbadmin
+Try {
+    wbadmin start systemstatebackup -backupTarget:$backupDrive -quiet
+    Write-Host "La sauvegarde de l'Active Directory a été lancée avec succès." -ForegroundColor Green
+} Catch {
+    Write-Host "Échec du lancement de la sauvegarde de l'Active Directory : $_" -ForegroundColor Red
+    exit
+}
+
+# --- 8. Vérification des logs de wbadmin ---
+Write-Host "Vérification des logs de wbadmin..."
+
+# Filtrer les événements pour wbadmin
+$wbadminLogs = Get-WinEvent -LogName Application | Where-Object { $_.ProviderName -eq "wbadmin" }
+
+if ($wbadminLogs.Count -gt 0) {
+    Write-Host "Logs de wbadmin trouvés :"
+    foreach ($log in $wbadminLogs) {
+        Write-Host "Log Date: $($log.TimeCreated) - Message: $($log.Message)"
+    }
+} else {
+    Write-Host "Aucun log de wbadmin trouvé." -ForegroundColor Yellow
+}
+
+# --- 9. Planification de la sauvegarde ---
+Write-Host "Planification de la sauvegarde dans 2 minutes..."
+
+# Créer une tâche planifiée pour exécuter la sauvegarde
+$action = New-ScheduledTaskAction -Execute "wbadmin" -Argument "start backup -backupTarget:$backupDrive -include:$backupSourceFormatted -allCritical -quiet"
+$trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(2))
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+
+Register-ScheduledTask -TaskName "ScheduledBackup" -Action $action -Trigger $trigger -Principal $principal -Settings $settings
+
+Write-Host "La sauvegarde planifiée a été créée et s'exécutera dans 2 minutes." -ForegroundColor Green
+
+# --- 10. Vérification de la sauvegarde ---
 Start-Sleep -Seconds 10  # Attendre quelques secondes pour éviter une vérification instantanée
 $backupStatus = wbadmin get versions
 
