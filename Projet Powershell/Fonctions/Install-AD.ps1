@@ -34,7 +34,7 @@
     Add-DnsServerPrimaryZone -Name "$DomainNETBIOS.LOCAL" -ZoneFile "$DomainNETBIOS.LOCAL.dns" -DynamicUpdate Secure
 
     #Ajouter une zone de recherche inversée
-    Add-DnsServerPrimaryZone -NetworkID "192.168.133.0/24" -ReplicationScope "Forest"
+    Add-DnsServerPrimaryZone -NetworkID "192.168.133.0/24" -ZoneFile "133.168.192.in-addr.arpa.dns"
 
     Restart-Computer -Force
 
