@@ -1,5 +1,8 @@
 # 📝 **Rapport des Tâches Effectuées**
 
+![MrBeanGIF](https://github.com/user-attachments/assets/9a1fa20f-eabf-4a1f-8fce-c906101995d5)
+
+
 ## 📧 **Informations des Membres**
 
 | **Nom**       | **Prénom**   | **Email**                      | **Tâches Effectuées**         |
